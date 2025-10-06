@@ -1,3 +1,0 @@
-[submodule "lib/tree-sitter-bencode"]
-	path = lib/tree-sitter-bencode
-	url = https://github.com/Samasaur1/tree-sitter-bencode
