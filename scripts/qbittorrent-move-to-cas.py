@@ -132,6 +132,83 @@ def hardlink_copy(src: str, dst: str):
                 # If hardlink fails, fallback to copy
                 shutil.copy2(src_file, dst_file)
 
+
+
+# deduplicate files
+
+import os
+import hashlib
+
+def sha1sum(file_path, block_size=65536):
+    """Compute SHA-1 checksum of a file in chunks."""
+    h = hashlib.sha1()
+    with open(file_path, 'rb') as f:
+        for chunk in iter(lambda: f.read(block_size), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+def files_are_identical(src_file, dst_file):
+    """Return True if src_file and dst_file are identical."""
+    try:
+        src_stat = os.stat(src_file)
+        dst_stat = os.stat(dst_file)
+    except FileNotFoundError:
+        return False
+
+    # 1. Check device & inode (hardlink equality)
+    if (src_stat.st_dev == dst_stat.st_dev) and (src_stat.st_ino == dst_stat.st_ino):
+        return True
+
+    # 2. Check file sizes
+    if src_stat.st_size != dst_stat.st_size:
+        return False
+
+    # 3. Check SHA-1 hashes
+    return sha1sum(src_file) == sha1sum(dst_file)
+
+def deduplicate_files(src, dst):
+    """
+    Deduplicate files between src and dst.
+    If identical files exist in both, remove the duplicate in dst.
+    """
+    if not os.path.exists(src) or not os.path.exists(dst):
+        raise FileNotFoundError("Both src and dst must exist.")
+
+    if os.path.isfile(src):
+        # If src is a single file
+        if os.path.isfile(dst) and files_are_identical(src, dst):
+            print(f"  removing duplicate: {dst}")
+            os.remove(dst)
+        return
+
+    # If src is a directory, walk recursively
+    for root, _, files in os.walk(src):
+        for name in files:
+            src_file = os.path.join(root, name)
+            # Compute relative path from src to locate matching file in dst
+            rel_path = os.path.relpath(src_file, src)
+            dst_file = os.path.join(dst, rel_path)
+
+            if os.path.isfile(dst_file):
+                if files_are_identical(src_file, dst_file):
+                    print(f"  removing duplicate {dst_file}")
+                    os.remove(dst_file)
+
+
+
+def remove_empty_directories(dir_path):
+    if not os.path.isdir(dir_path):
+        return
+    for src_dir, dirs, files in os.walk(dir_path, topdown=False):
+        dirs.sort()
+        try:
+            os.rmdir(src_dir)
+        except Exception as exc:
+            # print(f"    failed to remove dir {src_dir}: {exc}")
+            pass
+
+
+
 with qbittorrentapi.Client(**conn_info) as qbt_client:
 
     #if qbt_client.torrents_add(urls="...") != "Ok.":
@@ -298,6 +375,9 @@ with qbittorrentapi.Client(**conn_info) as qbt_client:
             # print(f"TODO move to same CAS: {src_content_path}")
             dst_content_path = "/".join(src_content_path_parts[:-2] + cas_subdir_parts + [torrent_name])
             dst_save_path = "/".join(src_content_path_parts[:-2] + cas_subdir_parts)
+            # /cas/duplicate/{name}
+            src_content_path_duplicate = "/".join(src_content_path_parts[:-2] + ["duplicate"] + [torrent_name])
+            dst_content_path_incomplete = "/".join(src_content_path_parts[:-2] + ["incomplete"] + [torrent_name])
 
         else:
             # FIXME find dst_save_path on the same filesystem
@@ -314,18 +394,23 @@ with qbittorrentapi.Client(**conn_info) as qbt_client:
 
         wait_for_check = False
 
-        if os.path.exists(dst_save_path):
+        src_save_path_exists = os.path.exists(src_save_path)
+
+        dst_save_path_exists = os.path.exists(dst_save_path)
+
+        if dst_save_path_exists:
             # FIXME do a file-by-file comparison of src_save_path and dst_save_path
             # remove duplicate files from src_save_path
             # copy missing files to dst_save_path
             # handle file collisions between src_save_path and dst_save_path
-            if 1:
+            if 0:
                 print("  FIXME dst_save_path exists")
                 torrent.add_tags("move-to-cas-fixme")
                 continue
             # FIXME this is not always true
             print("  note: dst_save_path exists. qbittorrent will check files.", dst_save_path)
             wait_for_check = True
+            # add tag for manual inspection: is progress 100%?
             torrent.add_tags("move-to-cas-dst-exists")
 
         # if src_content_path is used by multiple torrents
@@ -362,6 +447,10 @@ with qbittorrentapi.Client(**conn_info) as qbt_client:
             "checkingResumeData", # Checking resume data on qBt startup
         )
 
+        moving_states = (
+            "moving",
+        )
+
         # only one moving state:
         # moving  Torrent is moving to another location
 
@@ -372,29 +461,33 @@ with qbittorrentapi.Client(**conn_info) as qbt_client:
                     continue
                 return torrent2.state
 
-        # TODO refactor checking and moving
-
-        if get_state() in checking_states:
-            print("  waiting: qbittorrent is checking files ", end="")
-            sys.stdout.flush()
-            time.sleep(2)
+        torrent_state = get_state()
+        prev_torrent_state = torrent_state
+        while torrent_state in checking_states + moving_states:
+            if prev_torrent_state != torrent_state:
+                print(f"  torrent_state: {torrent_state} -> waiting")
             # todo timeout
-            while get_state() in checking_states:
-                print(".", end="")
-                sys.stdout.flush()
-                time.sleep(2)
-            print(" ok")
-
-        if get_state() == "moving":
-            print("  waiting: qbittorrent is moving files ", end="")
-            sys.stdout.flush()
             time.sleep(2)
-            # todo timeout
-            while get_state() == "moving":
-                print(".", end="")
-                sys.stdout.flush()
-                time.sleep(2)
-            print(" ok")
+            prev_torrent_state = torrent_state
+            torrent_state = get_state()
+
+        if dst_save_path_exists:
+            torrent_progress = None
+            for torrent2 in qbt_client.torrents_info():
+                if torrent2.info.hash != torrent.info.hash:
+                    continue
+                torrent_progress = torrent2.progress
+                break
+            # extra check for progress == 100%
+            if torrent_progress == 1:
+                print(f"  ok: progress after move is complete")
+            else:
+                print(f"  FIXME progress after move: {torrent2.progress}")
+                torrent.add_tags("move-to-cas-duplicate-incomplete")
+                # FIXME ...
+                # torrent.set_location(src_save_path)
+                # move dst_content_path to dst_content_path_incomplete
+                # torrent.set_location(dst_save_path)
 
         # done moving content files
 
@@ -415,7 +508,9 @@ with qbittorrentapi.Client(**conn_info) as qbt_client:
             # this is the last torrent using src_content_path
             # and src_content_path still exists
             # so there must be non-content files in src_content_path
+            # or src_content_path is a duplicate
             print(f"  moving non-content files")
+            # TODO better. use torrent.files to find non-content files
             for src_dir, dirs, files in os.walk(src_content_path):
                 dirs.sort()
                 dst_dir = dst_content_path + src_dir[len(src_content_path):]
@@ -423,18 +518,36 @@ with qbittorrentapi.Client(**conn_info) as qbt_client:
                 for filename in sorted(files):
                     src_filepath = src_dir + "/" + filename
                     dst_filepath = dst_dir + "/" + filename
+                    if os.path.exists(dst_filepath):
+                        # print(f"    # {dst_filepath} # exists")
+                        continue
                     print(f"    {dst_filepath}")
                     shutil.move(src_filepath, dst_filepath)
-            print(f"  removing empty directories in {src_content_path}")
-            for src_dir, dirs, files in os.walk(src_content_path, topdown=False):
-                dirs.sort()
-                try:
-                    os.rmdir(src_dir)
-                except Exception as exc:
-                    print(f"    failed to remove dir {src_dir}: {exc}")
+            # print(f"  removing empty directories in {src_content_path}")
+            remove_empty_directories(src_content_path)
+
+            # "move non-content files" can remove src_save_path
+            src_save_path_exists = os.path.exists(src_save_path)
+
+            if src_save_path_exists and dst_save_path_exists:
+                if os.path.exists(src_content_path_duplicate):
+                    print(f"  FIXME src_content_path_duplicate exists: {src_content_path_duplicate!r}")
+                os.makedirs(os.path.dirname(src_content_path_duplicate), exist_ok=True)
+                print(f"  moving duplicate: mv {src_content_path!r} {src_content_path_duplicate!r}")
+                shutil.move(src_content_path, src_content_path_duplicate)
+                # deduplicate files
+                print(f"  removing duplicating files from {src_content_path_duplicate!r}")
+                deduplicate_files(dst_content_path, src_content_path_duplicate)
+                # print(f"  removing empty directories in {src_content_path_duplicate}")
+                remove_empty_directories(src_content_path_duplicate)
 
         torrent.add_tags("move-to-cas-done")
 
-        # time.sleep(1) # help user to kill this process
+        if 1:
+            time.sleep(1) # help user to kill this process
+
+        if 1:
+            print("waiting 5 seconds")
+            time.sleep(5) # help user to monitor this process
 
         # break # debug: stop after first torrent
