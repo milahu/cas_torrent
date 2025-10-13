@@ -235,6 +235,53 @@ with qbittorrentapi.Client(**conn_info) as qbt_client:
             print(f"FIXME failed to parse infohash: torrent_id={torrent_id} btih={btih} btmh={btmh}")
             continue
 
+        # get the original name from the .torrent file
+        # torrent.name can be different from the original name
+        # when the torrent was added via magnet URI
+        # then the "dn" value from the magnet URI is used as torrent.name
+        # or when the user has renamed the torrent name
+        torrent_name = None
+        # FIXME require qBittorrent version 5.1.1
+        # if version_compare(actual_qbt_version, "5.1.1") >= 0:
+        if 0:
+            # FIXME this requires qBittorrent 5.1.1
+            # https://github.com/qbittorrent/qBittorrent/pull/21015
+            # GET /api/v2/torrents/fetchMetadata?source=$source
+            # source: magnet URI, torrent infohash (torrent ID?), torrent URL
+            # https://github.com/rmartin16/qbittorrent-api/blob/09a09f1c6632baf383b3fb0e227e9c3d0f9d6e43/src/qbittorrentapi/request.py#L572
+            # TODO how to call "hidden" API methods with qbittorrentapi
+            # "hidden" as in: not-yet exposed by qbittorrentapi
+            res = qbt_client._auth_request(
+                http_method="post",
+                api_namespace="torrents",
+                api_method="fetchMetadata",
+                # requests_args=requests_args,
+                # requests_params=requests_params,
+                # headers=headers,
+                params=dict(source=torrent_id),
+                # data=data,
+                # files=files,
+                # response_class=response_class,
+                # version_introduced=version_introduced,
+                # version_removed=version_removed,
+                # **kwargs,
+            )
+            # FIXME set torrent_name from res
+            print("res", res)
+            raise NotImplementedError("get original torrent name from /api/v2/torrents/fetchMetadata")
+        else:
+            torrent_file_path = os.path.expanduser(f"~/.local/share/qBittorrent/BT_backup/{torrent_id}.torrent")
+            # FIXME torf does not support v2 torrents https://github.com/rndusr/torf/issues/55
+            if not os.path.exists(torrent_file_path):
+                print(f"missing torrent file {torrent_file_path} -> skipping this torrent")
+                # torrent status: fetching metadata
+                continue
+            torf_torrent = torf.Torrent.read(torrent_file_path)
+            torrent_name = str(torf_torrent.name) # force copy of value
+            del torf_torrent
+        assert torrent_name != None
+        print("torrent_name", torrent_name)
+
         src_content_path_parts = src_content_path.split("/")
 
         if src_content_path_parts[-4] == "cas" and src_content_path_parts[-3] in ["btih", "btmh"]:
@@ -249,7 +296,7 @@ with qbittorrentapi.Client(**conn_info) as qbt_client:
             # content is stored in the "todo" directory of a CAS filesystem
             # src_content_path = f"{cas_parent_dir}/cas/todo/{name}"
             # print(f"TODO move to same CAS: {src_content_path}")
-            dst_content_path = "/".join(src_content_path_parts[:-2] + cas_subdir_parts + src_content_path_parts[-1:])
+            dst_content_path = "/".join(src_content_path_parts[:-2] + cas_subdir_parts + [torrent_name])
             dst_save_path = "/".join(src_content_path_parts[:-2] + cas_subdir_parts)
 
         else:
