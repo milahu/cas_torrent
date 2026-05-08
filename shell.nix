@@ -11,6 +11,8 @@ pkgs.mkShell {
     (python3.withPackages (pp: with pp; [
       qbittorrent-api
       rtorrent-rpc
+      bencode-py
+      torf
     ]))
   ];
 }
