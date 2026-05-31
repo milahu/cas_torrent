@@ -239,7 +239,15 @@ with qbittorrentapi.Client(**conn_info) as qbt_client:
         if os.path.dirname(src_content_path) != src_save_path:
             # single-file in single-directory torrent
             src_content_path = os.path.dirname(src_content_path)
-        assert os.path.dirname(src_content_path) == src_save_path
+        if os.path.dirname(src_content_path) != src_save_path:
+            raise ValueError(
+                f"found torrent with file mappings."
+                f" please run qbittorrent-remove-file-mappings.py\n"
+                f"torrent.name: {torrent.name}\n"
+                f"torrent.infohash_v1: {torrent.infohash_v1}\n"
+                f"torrent.save_path:    {torrent.save_path}\n"
+                f"torrent.content_path: {torrent.content_path}\n"
+            )
         if not src_content_path in torrents_by_src_content_path:
             torrents_by_src_content_path[src_content_path] = list()
         torrents_by_src_content_path[src_content_path].append(torrent)
